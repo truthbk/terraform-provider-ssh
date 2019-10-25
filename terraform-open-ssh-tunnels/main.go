@@ -3,15 +3,19 @@ package main
 import (
 	"fmt"
 	"io"
+	"io/ioutil"
 	"net"
 	"os"
 	"os/user"
+	"path/filepath"
 	"strconv"
 	"sync"
+	"time"
 
 	"github.com/hashicorp/terraform/terraform"
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/agent"
+	knownhosts "golang.org/x/crypto/ssh/knownhosts"
 )
 
 func main() {
@@ -35,10 +39,16 @@ func main() {
 	}
 	// fmt.Printf("Plan: %v\n", plan)
 
+	hostKeyCallback, err := knownhosts.New(filepath.Join(os.Getenv("HOME"), ".ssh", "known_hosts"))
+	if err != nil {
+		os.Exit(1)
+	}
+
 	var wg sync.WaitGroup
 	for _, m := range plan.State.Modules {
 		for _, r := range m.Resources {
 			if r.Type == "ssh_tunnel" {
+
 				d := r.Primary.Attributes
 				username := d["user"]
 				if username == "" {
@@ -53,11 +63,33 @@ func main() {
 				remoteAddress := d["remote_address"]
 				sshAgent, _ := strconv.ParseBool(d["ssh_agent"])
 
+				authMethods := []ssh.AuthMethod{}
+				callback := ssh.InsecureIgnoreHostKey()
+				privateKey := os.Getenv("QA_PRIVATE_KEY")
+				if privateKey != "" {
+					key, err := ioutil.ReadFile(privateKey)
+					if err != nil {
+						fmt.Printf("unable to read private key: %v", err)
+						return
+					}
+
+					// Create the Signer for this private key.
+					signer, err := ssh.ParsePrivateKey(key)
+					if err != nil {
+						fmt.Printf("unable to parse private key: %v", err)
+						return
+					}
+
+					callback = hostKeyCallback
+					authMethods = append(authMethods, ssh.PublicKeys(signer))
+				}
+
 				sshConf := &ssh.ClientConfig{
 					User:            username,
-					HostKeyCallback: ssh.InsecureIgnoreHostKey(),
-					Auth:            []ssh.AuthMethod{},
+					Auth:            authMethods,
+					HostKeyCallback: callback,
 				}
+
 				if sshAgent {
 					sshAuthSock, ok := os.LookupEnv("SSH_AUTH_SOCK")
 					if ok {
@@ -120,6 +152,7 @@ func main() {
 						}()
 					}
 				}()
+				time.Sleep(1 * time.Second)
 
 			}
 		}
